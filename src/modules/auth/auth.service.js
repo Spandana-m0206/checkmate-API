@@ -62,7 +62,10 @@ const authService = {
     try {
       await sendOTPEmail(email, otp);
     } catch (error) {
-      logger.error(`SendGrid error: ${error.message}`);
+      const sgBody = error.response?.body;
+      logger.error(
+        `SendGrid error: ${error.message}${sgBody ? ` | ${JSON.stringify(sgBody)}` : ""}`
+      );
       throw new ApiError(500, "Failed to send OTP email");
     }
   },
