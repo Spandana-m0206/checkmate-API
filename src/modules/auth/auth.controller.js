@@ -76,7 +76,9 @@ const authController = {
         throw new ApiError(400, "Username, name, and date of birth are required");
       }
 
-      const profileImage = req.file ? req.file.filename : null;
+      const profileImage = req.file
+        ? `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`
+        : null;
 
       const result = await authService.register({
         email: email.toLowerCase().trim(),

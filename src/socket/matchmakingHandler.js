@@ -1,6 +1,21 @@
 import { matchmakingService } from "../modules/matchmaking/index.js";
+import { userService } from "../modules/user/index.js";
 import redis from "../config/redis.js";
 import logger from "../utils/logger.js";
+
+// Look up username + profileImage for both players
+async function getPlayerProfiles(whiteId, blackId) {
+  const [white, black] = await Promise.all([
+    userService.findById(whiteId),
+    userService.findById(blackId),
+  ]);
+  return {
+    whiteUsername: white?.username || null,
+    whiteProfileImage: white?.profileImage || null,
+    blackUsername: black?.username || null,
+    blackProfileImage: black?.profileImage || null,
+  };
+}
 
 export default function matchmakingHandler(io, socket) {
   // joinQueue — add user to FIFO matchmaking queue
@@ -40,11 +55,15 @@ export default function matchmakingHandler(io, socket) {
       const whiteId = gameState.whitePlayerId;
       const blackId = gameState.blackPlayerId;
 
+      // Look up player details
+      const profiles = await getPlayerProfiles(whiteId, blackId);
+
       // Emit gameStarted to both players
       const basePayload = {
         gameId,
         whitePlayerId: whiteId,
         blackPlayerId: blackId,
+        ...profiles,
         fen: gameState.fen,
         turnStartedAt: gameState.turnStartedAt,
       };
@@ -153,10 +172,14 @@ export default function matchmakingHandler(io, socket) {
 
       const whiteId = gameState.whitePlayerId;
 
+      // Look up player details
+      const profiles = await getPlayerProfiles(gameState.whitePlayerId, gameState.blackPlayerId);
+
       const basePayload = {
         gameId,
         whitePlayerId: gameState.whitePlayerId,
         blackPlayerId: gameState.blackPlayerId,
+        ...profiles,
         fen: gameState.fen,
         turnStartedAt: gameState.turnStartedAt,
       };

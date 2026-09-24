@@ -19,9 +19,6 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-// Serve uploaded profile images
-app.use("/uploads", express.static("src/uploads"));
-
 // Routes
 app.use("/api/v1", routes);
 
