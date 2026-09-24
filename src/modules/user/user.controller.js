@@ -46,8 +46,10 @@ const userController = {
         throw new ApiError(400, "Profile image file is required");
       }
 
+      const base64 = req.file.buffer.toString("base64");
+      const dataUri = `data:${req.file.mimetype};base64,${base64}`;
       const user = await userService.updateById(req.user.userId, {
-        profileImage: req.file.filename,
+        profileImage: dataUri,
       });
 
       const response = new ApiResponse(200, { user }, "Profile image updated");

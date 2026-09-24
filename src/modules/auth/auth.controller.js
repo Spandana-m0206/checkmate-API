@@ -2,6 +2,15 @@ import authService from "./auth.service.js";
 import ApiResponse from "../../utils/ApiResponse.js";
 import ApiError from "../../utils/ApiError.js";
 
+const REFRESH_COOKIE_NAME = "refreshToken";
+const REFRESH_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+  path: "/api/v1/auth",
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+};
+
 const authController = {
   // POST /auth/send-otp
   async sendOTP(req, res, next) {
@@ -40,8 +49,16 @@ const authController = {
         otp.toString()
       );
 
-      const response = new ApiResponse(200, result, "OTP verified");
-      res.status(200).json(response);
+      // For existing users, set refresh token as HttpOnly cookie
+      if (!result.isNewUser) {
+        res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, REFRESH_COOKIE_OPTIONS);
+        // Only send accessToken in body — refreshToken stays in cookie
+        const { refreshToken, ...body } = result;
+        return res.status(200).json(new ApiResponse(200, body, "OTP verified"));
+      }
+
+      // New user — no tokens yet
+      res.status(200).json(new ApiResponse(200, result, "OTP verified"));
     } catch (error) {
       next(error);
     }
@@ -50,43 +67,70 @@ const authController = {
   // POST /auth/register
   async register(req, res, next) {
     try {
-      const { registrationToken, username, name, dateOfBirth } = req.body;
+      const { email, username, name, dateOfBirth } = req.body;
 
-      if (!registrationToken) {
-        throw new ApiError(400, "Registration token is required");
+      if (!email) {
+        throw new ApiError(400, "Email is required");
       }
       if (!username || !name || !dateOfBirth) {
         throw new ApiError(400, "Username, name, and date of birth are required");
       }
 
-      // Verify registration token
-      const decoded = authService.verifyRegistrationToken(registrationToken);
-
-      // Build profile image path if file was uploaded
-      const profileImage = req.file ? req.file.filename : null;
+      const profileImage = req.file
+        ? `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`
+        : null;
 
       const result = await authService.register({
-        email: decoded.email,
+        email: email.toLowerCase().trim(),
         username,
         name,
         dateOfBirth,
         profileImage,
       });
 
-      const response = new ApiResponse(201, result, "Registration successful");
-      res.status(201).json(response);
+      // Set refresh token as HttpOnly cookie
+      res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, REFRESH_COOKIE_OPTIONS);
+      const { refreshToken, ...body } = result;
+
+      res.status(201).json(new ApiResponse(201, body, "Registration successful"));
     } catch (error) {
       next(error);
     }
   },
+
+  // POST /auth/refresh-token
+  async refreshAccessToken(req, res, next) {
+    try {
+      // Read refresh token from HttpOnly cookie
+      const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+
+      const result = await authService.refreshAccessToken(refreshToken);
+
+      // Set new refresh token cookie
+      res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, REFRESH_COOKIE_OPTIONS);
+      const { refreshToken: _, ...body } = result;
+
+      res.status(200).json(new ApiResponse(200, body, "Token refreshed"));
+    } catch (error) {
+      next(error);
+    }
+  },
+
   // POST /auth/logout
   async logout(req, res, next) {
     try {
       const token = req.headers.authorization.split(" ")[1];
-      await authService.logout(token);
+      await authService.logout(token, req.user.userId);
 
-      const response = new ApiResponse(200, null, "Logged out successfully");
-      res.status(200).json(response);
+      // Clear refresh token cookie
+      res.clearCookie(REFRESH_COOKIE_NAME, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+        path: "/api/v1/auth",
+      });
+
+      res.status(200).json(new ApiResponse(200, null, "Logged out successfully"));
     } catch (error) {
       next(error);
     }

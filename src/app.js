@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import errorMiddleware from "./middlewares/error.middleware.js";
 import routes from "./modules/index.js";
 import logger from "./utils/logger.js";
@@ -11,11 +12,12 @@ const app = express();
 
 // Security & parsing
 app.use(helmet());
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || "*" }));
+app.use(cors({
+  origin: process.env.CLIENT_ORIGIN || "http://localhost:5173",
+  credentials: true,
+}));
 app.use(express.json());
-
-// Serve uploaded profile images
-app.use("/uploads", express.static("src/uploads"));
+app.use(cookieParser());
 
 // Routes
 app.use("/api/v1", routes);

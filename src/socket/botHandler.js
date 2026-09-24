@@ -1,5 +1,6 @@
 import { botService } from "../modules/bot/index.js";
 import { matchmakingService } from "../modules/matchmaking/index.js";
+import { userService } from "../modules/user/index.js";
 import { acquireLock, releaseLock } from "./gameLock.js";
 import { playBotTurn } from "./gameHandler.js";
 import { GameMode, PieceColor } from "../utils/enums.js";
@@ -25,10 +26,20 @@ export default function botHandler(io, socket) {
       // Only the human joins the room — the bot has no socket.
       socket.join(`game:${gameId}`);
 
+      // Look up player details
+      const [whiteUser, blackUser] = await Promise.all([
+        userService.findById(gameState.whitePlayerId),
+        userService.findById(gameState.blackPlayerId),
+      ]);
+
       socket.emit("gameStarted", {
         gameId,
         whitePlayerId: gameState.whitePlayerId,
         blackPlayerId: gameState.blackPlayerId,
+        whiteUsername: whiteUser?.username || null,
+        whiteProfileImage: whiteUser?.profileImage || null,
+        blackUsername: blackUser?.username || null,
+        blackProfileImage: blackUser?.profileImage || null,
         fen: gameState.fen,
         yourColor: humanColor,
         turnStartedAt: gameState.turnStartedAt,
