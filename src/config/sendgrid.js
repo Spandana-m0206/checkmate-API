@@ -12,7 +12,7 @@ export const sendOTPEmail = async (email, otp) => {
         <h2>Checkmate</h2>
         <p>Your one-time password is:</p>
         <h1 style="letter-spacing: 8px; font-size: 36px;">${otp}</h1>
-        <p>This code expires in 5 minutes.</p>
+        <p>This code expires in 10 minutes.</p>
       </div>
     `,
   };

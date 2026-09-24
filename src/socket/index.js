@@ -11,7 +11,10 @@ let io;
 
 export const initSocket = (server) => {
   io = new Server(server, {
-    cors: { origin: process.env.CLIENT_ORIGIN || "*" },
+    cors: {
+      origin: process.env.CLIENT_ORIGIN || "http://localhost:5173",
+      credentials: true,
+    },
   });
 
   // Authenticate every socket connection

@@ -160,34 +160,47 @@ sequenceDiagram
 
     C->>S: POST /auth/send-otp { email }
     S->>S: Generate 4-digit OTP
-    S->>R: SET otp:{email} { bcrypt(otp) } EX 300
+    S->>R: SET otp:{email} { bcrypt(otp), expiresAt } EX 600
     S->>SG: Send OTP email
     S->>C: 200 "OTP sent"
 
     C->>S: POST /auth/verify-otp { email, otp }
     S->>R: GET otp:{email}
+    S->>S: Check expiresAt > Date.now()
     S->>S: bcrypt.compare(otp, storedHash)
     S->>R: DEL otp:{email}
     S->>M: Find user by email
 
     alt Existing user
-        S->>S: Sign JWT (24h expiry)
-        S->>C: 200 { token, user, isNewUser: false }
+        S->>S: Sign access token (12h) + refresh token (7d)
+        S->>M: Save refresh token to User document
+        S->>C: 200 { accessToken, refreshToken, user, isNewUser: false }
     else New user
-        S->>S: Sign registration token (10min expiry)
-        S->>C: 200 { registrationToken, isNewUser: true }
+        S->>R: SET email-verified:{email} EX 600
+        S->>C: 200 { isNewUser: true }
     end
 
     Note over C,S: New users complete registration
 
-    C->>S: POST /auth/register { registrationToken, username, name, dateOfBirth, profileImage? }
-    S->>S: Verify registration token
+    C->>S: POST /auth/register { email, username, name, dateOfBirth, profileImage? }
+    S->>R: GET email-verified:{email}
     S->>M: Create User document
-    S->>S: Sign JWT (24h expiry)
-    S->>C: 201 { token, user }
+    S->>S: Sign access token (12h) + refresh token (7d)
+    S->>M: Save refresh token to User document
+    S->>R: DEL email-verified:{email}
+    S->>C: 201 { accessToken, refreshToken, user }
+
+    Note over C,S: When access token expires
+
+    C->>S: POST /auth/refresh-token { refreshToken }
+    S->>S: Verify refresh token JWT (REFRESH_SECRET)
+    S->>M: Find user, check stored refreshToken matches
+    S->>S: Generate new access token + new refresh token
+    S->>M: Update user.refreshToken
+    S->>C: 200 { accessToken, refreshToken }
 ```
 
-**Why JWT?** JWTs are stateless — the server does not need to query a session store on every request. This keeps REST endpoints fast and allows Socket.IO to authenticate during the handshake without a database round-trip. The trade-off is that revocation requires a blacklist (stored in Redis with TTL matching the token's remaining lifetime).
+**Why access + refresh tokens?** Access tokens (12h, signed with `JWT_SECRET`) are stateless — the server does not query a session store on every request. Refresh tokens (7d, signed with `REFRESH_SECRET`) are stored in the User document and rotated on each use, extending the session without re-authentication. On logout, the refresh token is cleared from the User document and the access token is blacklisted in Redis.
 
 ### Random Matchmaking Flow
 
@@ -368,6 +381,7 @@ erDiagram
         String email UK
         Date dateOfBirth
         String profileImage
+        String refreshToken
         Date createdAt
         Date updatedAt
     }
@@ -430,7 +444,8 @@ erDiagram
 
 | Key Pattern | Data | TTL | Purpose |
 |---|---|---|---|
-| `otp:{email}` | `{ otp: bcryptHash, createdAt }` | 300s | OTP verification |
+| `otp:{email}` | `{ otp: bcryptHash, expiresAt }` | 600s | OTP verification (10-min validity window) |
+| `email-verified:{email}` | `"1"` | 600s | Marks email as OTP-verified for registration |
 | `blacklist:{token}` | `"1"` | Token's remaining lifetime | Logout / token revocation |
 | `user:online:{userId}` | Socket ID | None (deleted on disconnect) | Track connected players |
 | `user:active-game:{userId}` | Game ID | None (deleted on game end) | Enforce one active game per user |
@@ -559,9 +574,10 @@ Active chess games produce frequent, low-latency state changes (moves, timer tic
 | Method | Route | Auth | Description |
 |---|---|---|---|
 | `POST` | `/api/v1/auth/send-otp` | No | Send a 4-digit OTP to the provided email address. |
-| `POST` | `/api/v1/auth/verify-otp` | No | Verify OTP. Returns JWT (existing user) or registration token (new user). |
-| `POST` | `/api/v1/auth/register` | No (registration token in body) | Complete registration with username, name, DOB, and optional profile image. Returns JWT. |
-| `POST` | `/api/v1/auth/logout` | Bearer token | Blacklist the current JWT. |
+| `POST` | `/api/v1/auth/verify-otp` | No | Verify OTP. Returns access + refresh tokens (existing user) or `isNewUser: true` (new user). |
+| `POST` | `/api/v1/auth/register` | No (email must be OTP-verified) | Complete registration with email, username, name, DOB, and optional profile image. Returns access + refresh tokens. |
+| `POST` | `/api/v1/auth/refresh-token` | No | Exchange a valid refresh token for a new access + refresh token pair. |
+| `POST` | `/api/v1/auth/logout` | Bearer token | Clear refresh token and blacklist access token. |
 
 ### User Profile
 
@@ -752,10 +768,11 @@ profileImage: (file)
 
 - **Passwordless OTP**: No passwords are stored anywhere. Users authenticate by proving email ownership via a 4-digit OTP sent through SendGrid.
 - **OTP hashing**: OTPs are bcrypt-hashed before storage in Redis. Even if Redis is compromised, plaintext OTPs are not exposed.
-- **OTP expiry**: 5-minute TTL in Redis. Expired OTPs are automatically purged.
-- **JWT (24-hour expiry)**: Issued on successful OTP verification (existing users) or registration (new users). Carried in the `Authorization: Bearer <token>` header for REST and in `socket.handshake.auth.token` for Socket.IO.
-- **Registration token**: A separate short-lived JWT (10-minute expiry, signed with a distinct secret) that authorizes a single registration attempt. This prevents a verified email from being used to register after the verification context has expired.
-- **Token blacklisting**: On logout, the token is added to Redis with a TTL matching its remaining lifetime. Both REST middleware and Socket.IO auth check the blacklist before accepting a token.
+- **OTP expiry**: 10-minute validity window. The server stores an explicit `expiresAt` timestamp alongside the hashed OTP and checks `expiresAt > Date.now()` on verification. The Redis key also has a 10-minute TTL for automatic cleanup.
+- **Access token (12-hour expiry)**: Issued on successful OTP verification (existing users) or registration (new users). Signed with `JWT_SECRET`. Carried in the `Authorization: Bearer <token>` header for REST and in `socket.handshake.auth.token` for Socket.IO.
+- **Refresh token (7-day expiry)**: Issued alongside the access token. Signed with `REFRESH_SECRET`. Stored in the User document's `refreshToken` field. On each refresh, both tokens are rotated — a new access token and a new refresh token are generated, and the old refresh token is replaced in the database.
+- **Email verification for registration**: When a new user verifies their OTP, the server stores a temporary `email-verified:{email}` key in Redis (10-minute TTL). The register endpoint checks this key exists before creating the user.
+- **Token blacklisting**: On logout, the access token is added to the Redis blacklist with a TTL matching its remaining lifetime, and the refresh token is cleared from the User document. Both REST middleware and Socket.IO auth check the blacklist before accepting an access token.
 
 ### HTTP Security
 
@@ -764,13 +781,13 @@ profileImage: (file)
 
 ### Secrets Management
 
-All secrets (`JWT_SECRET`, `REGISTRATION_TOKEN_SECRET`, `SENDGRID_API_KEY`, database URIs) are loaded from environment variables via `dotenv`. The `.env` file is gitignored. No secrets are hardcoded or committed.
+All secrets (`JWT_SECRET`, `REFRESH_SECRET`, `SENDGRID_API_KEY`, database URIs) are loaded from environment variables via `dotenv`. The `.env` file is gitignored. No secrets are hardcoded or committed.
 
 ### Security Trade-offs
 
 Authentication was intentionally kept simple for the scope of this project:
 
-- **No refresh tokens**: The JWT has a 24-hour lifetime. When it expires, the user re-authenticates via OTP. A production system could introduce short-lived access tokens (15 minutes) with refresh-token rotation, but this adds complexity (token storage, rotation logic, revocation lists) that is not justified for the current scope.
+- **Access token lifetime**: The access token has a 12-hour lifetime. When it expires, the client uses the refresh token to obtain a new pair without re-authentication. If the refresh token also expires (7 days), the user must re-authenticate via OTP.
 - **No rate limiting**: OTP endpoints and Socket.IO connections are not rate-limited. A production deployment should add rate limiting (e.g., `express-rate-limit`) to prevent OTP brute-forcing and abuse.
 - **Ephemeral file storage**: Profile images are stored on the local filesystem, which is acceptable for development but not for production (see [Deployment](#deployment)).
 
@@ -879,7 +896,7 @@ The Redis client (`src/config/redis.js`) supports two connection modes:
 | `REDIS_PORT` | Local dev | `6379` | Redis port. |
 | `REDIS_PASSWORD` | No | — | Redis password. |
 | `JWT_SECRET` | Yes | — | Secret for signing authentication JWTs. |
-| `REGISTRATION_TOKEN_SECRET` | Yes | — | Separate secret for signing registration tokens. |
+| `REFRESH_SECRET` | Yes | — | Secret for signing refresh tokens (7-day expiry). |
 | `SENDGRID_API_KEY` | Yes | — | SendGrid API key for sending OTP emails. |
 | `SENDGRID_FROM_EMAIL` | Yes | — | Verified sender email address for SendGrid. |
 | `CLIENT_ORIGIN` | No | `*` | Allowed CORS origin. Set to frontend URL in production. |
@@ -895,7 +912,7 @@ MONGO_URI=<mongodb-connection-string>
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 JWT_SECRET=<random-secret>
-REGISTRATION_TOKEN_SECRET=<random-secret>
+REFRESH_SECRET=<random-secret>
 SENDGRID_API_KEY=<sendgrid-api-key>
 SENDGRID_FROM_EMAIL=<verified-sender-email>
 CLIENT_ORIGIN=http://localhost:5173
@@ -1115,7 +1132,7 @@ MONGO_URI=mongodb://localhost:27017/checkmate
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 JWT_SECRET=your-jwt-secret-here
-REGISTRATION_TOKEN_SECRET=your-registration-token-secret-here
+REFRESH_SECRET=your-refresh-token-secret-here
 SENDGRID_API_KEY=your-sendgrid-api-key
 SENDGRID_FROM_EMAIL=your-verified-sender@example.com
 CLIENT_ORIGIN=http://localhost:5173
